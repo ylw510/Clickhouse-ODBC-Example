@@ -7,8 +7,26 @@
 #include <sqlext.h>
 #include <string>
 #include <stdexcept>
-
+#include "odbc_pool.h"
 std::mutex io_mutex;
+
+void printSQLError(SQLHANDLE handle, SQLSMALLINT type) {
+    SQLCHAR sqlState[6], message[SQL_MAX_MESSAGE_LENGTH];
+    SQLINTEGER nativeError;
+    SQLSMALLINT textLength;
+    SQLRETURN ret;
+    SQLSMALLINT i = 1;
+
+    while ((ret = SQLGetDiagRec(type, handle, i, sqlState, &nativeError,
+                                message, sizeof(message), &textLength)) != SQL_NO_DATA) {
+        std::cerr << "ODBC Error: SQLState=" << sqlState
+                  << ", NativeError=" << nativeError
+                  << ", Message=" << message << std::endl;
+        ++i;
+    }
+}
+
+
 
 // 从文件读取连接字符串
 std::string read_conn_str_from_file(const std::string& filepath) {
@@ -34,55 +52,42 @@ std::string read_sql_from_file(const std::string& filepath) {
 }
 
 // 执行单条SQL语句
-void execute_sql(const std::string& conn_str, const std::string& sql, int repeat, int thread_id) {
-    SQLHENV env;
-    SQLHDBC dbc;
+void execute_sql(ODBCConnectionPool& pool, const std::string& sql, int repeat, int thread_id) {
+
+    SQLHDBC dbc = pool.getConnection();
     SQLHSTMT stmt;
-    SQLRETURN ret;
-
-    SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
-    SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (void*)SQL_OV_ODBC3, 0);
-    SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
-
-    ret = SQLDriverConnect(dbc, NULL,
-                           (SQLCHAR*)conn_str.c_str(), SQL_NTS,
-                           NULL, 0, NULL, SQL_DRIVER_COMPLETE);
-    if (!SQL_SUCCEEDED(ret)) {
-        std::lock_guard<std::mutex> lock(io_mutex);
-        std::cerr << "线程" << thread_id << ": 连接失败\n";
-        return;
-    }
-
     SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt);
 
     for (int i = 0; i < repeat; ++i) {
-        ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
-        
+        SQLRETURN ret = SQLExecDirect(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+
         if (SQL_SUCCEEDED(ret)) {
             if (i % 1000 == 0) {
                 std::lock_guard<std::mutex> lock(io_mutex);
-                std::cout << "线程" << thread_id << ": 第" << (i+1) << "次执行成功\n";        
+                std::cout << "线程" << thread_id << ": 第" << (i + 1) << "次执行成功\n";
             }
         } else {
             std::lock_guard<std::mutex> lock(io_mutex);
-            std::cerr << "线程" << thread_id << ": 第" << (i+1) << "次执行失败\n";
+            std::cerr << "线程" << thread_id << ": 第" << (i + 1) << "次执行失败\n";
+            printSQLError(stmt, SQL_HANDLE_STMT);
+            exit(1);
         }
-    }//end for
-    // 所有插入完成后提示
+
+    }
+
     {
         std::lock_guard<std::mutex> lock(io_mutex);
         std::cout << "线程" << thread_id << ": 已完成全部 " << repeat << " 次插入。\n";
     }
+
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-    SQLDisconnect(dbc);
-    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
-    SQLFreeHandle(SQL_HANDLE_ENV, env);
+    pool.returnConnection(dbc);
 }
 
 // 主程序
 int main(int argc, char* argv[]) {
     if (argc < 6) {
-        std::cerr << "用法: " << argv[0] << " <conn_str> <mode:DDL|DML> <sql_file> <threads> <repeat>\n";
+        std::cerr << "用法: " << argv[0] << " <conn_str_file> <mode:DDL|DML> <sql_file> <threads> <repeat>\n";
         return 1;
     }
 
@@ -108,14 +113,27 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // 创建连接池（大小可按线程数调整）
+    ODBCConnectionPool* pool_ptr = nullptr;
+    try {
+        pool_ptr = new ODBCConnectionPool(conn_str, threads);
+    } catch (const std::exception& ex) {
+        std::cerr << "创建连接池失败: " << ex.what() << '\n';
+        return 1;
+    }
+
+    // 使用完后记得释放
+    // 改成智能指针更好，这里示范最简单的写法
+    ODBCConnectionPool& pool = *pool_ptr;
+
     if (mode == "DDL") {
         std::cout << "执行DDL语句...\n";
-        execute_sql(conn_str, sql, 1, 0);
+        execute_sql(pool, sql, 1, 0);
     } else if (mode == "DML") {
         std::cout << "多线程执行DML语句...\n";
         std::vector<std::thread> thread_pool;
         for (int i = 0; i < threads; ++i) {
-            thread_pool.emplace_back(execute_sql, conn_str, sql, repeat, i);
+            thread_pool.emplace_back(execute_sql, std::ref(pool), sql, repeat, i);
         }
         for (auto& t : thread_pool) t.join();
     } else {
