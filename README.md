@@ -9,7 +9,7 @@ This is a command-line tool built with C++ that executes SQL statements on a Cli
 - ✅ Read SQL statements from an external file
 - ✅ Support for multi-threaded execution of DML operations
 - ✅ Control how many times each thread executes the SQL
-
+- ✅ Connection pooling for efficient reuse of ODBC connections in multi-threaded scenarios
 ---
 
 ## 🛠️ Build Instructions
@@ -20,10 +20,13 @@ This is a command-line tool built with C++ that executes SQL statements on a Cli
 - C++11 or later compiler
 - `unixODBC` (Linux) or `odbc32` (Windows)
 
-### Compile on Linux
+### Build with CMake (Linux/macOS)
 
 ```bash
-g++ clickhouse_odbc_tool.cpp -o clickhouse_odbc_tool -lodbc -std=c++11 -pthread
+mkdir build
+cd build
+cmake ..
+make
 ```
 
 ### Usage
